@@ -1,0 +1,183 @@
+{
+  "Comment": "E-commerce lakehouse ETL: route by dataset -> Glue+Delta job -> refresh catalog -> validate -> archive",
+  "StartAt": "DetermineDataset",
+  "States": {
+    "DetermineDataset": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.key", "StringMatches": "raw/products/*", "Next": "SetProductsContext" },
+        { "Variable": "$.key", "StringMatches": "raw/orders/*", "Next": "SetOrdersContext" },
+        { "Variable": "$.key", "StringMatches": "raw/order_items/*", "Next": "SetOrderItemsContext" }
+      ],
+      "Default": "UnknownDatasetFailed"
+    },
+
+    "SetProductsContext": {
+      "Type": "Pass",
+      "Parameters": {
+        "jobName": "${products_job_name}",
+        "deltaPath": "s3://${bucket_name}/lakehouse-dwh/products/",
+        "rejectedPath": "s3://${bucket_name}/rejected/products/",
+        "archivePrefix": "archived/products/",
+        "athenaTable": "${products_table}"
+      },
+      "ResultPath": "$.ctx",
+      "Next": "ProcessDataset"
+    },
+    "SetOrdersContext": {
+      "Type": "Pass",
+      "Parameters": {
+        "jobName": "${orders_job_name}",
+        "deltaPath": "s3://${bucket_name}/lakehouse-dwh/orders/",
+        "rejectedPath": "s3://${bucket_name}/rejected/orders/",
+        "archivePrefix": "archived/orders/",
+        "athenaTable": "${orders_table}"
+      },
+      "ResultPath": "$.ctx",
+      "Next": "ProcessDataset"
+    },
+    "SetOrderItemsContext": {
+      "Type": "Pass",
+      "Parameters": {
+        "jobName": "${order_items_job_name}",
+        "deltaPath": "s3://${bucket_name}/lakehouse-dwh/order_items/",
+        "rejectedPath": "s3://${bucket_name}/rejected/order_items/",
+        "archivePrefix": "archived/order_items/",
+        "ordersDeltaPath": "s3://${bucket_name}/lakehouse-dwh/orders/",
+        "productsDeltaPath": "s3://${bucket_name}/lakehouse-dwh/products/",
+        "athenaTable": "${order_items_table}"
+      },
+      "ResultPath": "$.ctx",
+      "Next": "ProcessDataset"
+    },
+
+    "ProcessDataset": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName.$": "$.ctx.jobName",
+        "Arguments": {
+          "--RAW_BUCKET.$": "$.bucket",
+          "--RAW_KEY.$": "$.key",
+          "--EXECUTION_NAME.$": "$$.Execution.Name",
+          "--REJECTED_PATH.$": "$.ctx.rejectedPath",
+          "--DELTA_PATH.$": "$.ctx.deltaPath",
+          "--ORDERS_DELTA_PATH.$": "$.ctx.ordersDeltaPath",
+          "--PRODUCTS_DELTA_PATH.$": "$.ctx.productsDeltaPath"
+        }
+      },
+      "TimeoutSeconds": 900,
+      "Retry": [
+        { "ErrorEquals": ["Glue.ConcurrentRunsExceededException"], "IntervalSeconds": 30, "MaxAttempts": 3, "BackoffRate": 2.0 }
+      ],
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }
+      ],
+      "ResultPath": null,
+      "Next": "StartCrawler"
+    },
+
+    "StartCrawler": {
+      "Comment": "Refreshes the Data Catalog so Athena sees new partitions/tables. Best-effort: a crawler hiccup shouldn't block archiving data that already merged successfully.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": { "Name": "${crawler_name}" },
+      "ResultPath": null,
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "LogNonCriticalError" }
+      ],
+      "Next": "WaitForCrawler"
+    },
+    "WaitForCrawler": {
+      "Type": "Wait",
+      "Seconds": 20,
+      "Next": "GetCrawlerStatus"
+    },
+    "GetCrawlerStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Parameters": { "Name": "${crawler_name}" },
+      "ResultPath": "$.crawlerStatus",
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "LogNonCriticalError" }
+      ],
+      "Next": "IsCrawlerDone"
+    },
+    "IsCrawlerDone": {
+      "Type": "Choice",
+      "Choices": [
+        { "Variable": "$.crawlerStatus.Crawler.State", "StringEquals": "RUNNING", "Next": "WaitForCrawler" },
+        { "Variable": "$.crawlerStatus.Crawler.State", "StringEquals": "STOPPING", "Next": "WaitForCrawler" }
+      ],
+      "Default": "ValidateWithAthena"
+    },
+
+    "ValidateWithAthena": {
+      "Comment": "Best-effort presence check that the merged data is queryable; not a data-quality gate.",
+      "Type": "Task",
+      "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+      "Parameters": {
+        "QueryString.$": "States.Format('SELECT count(*) AS row_count FROM ${glue_database}.{} LIMIT 1', $.ctx.athenaTable)",
+        "WorkGroup": "${athena_workgroup}"
+      },
+      "ResultPath": null,
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "LogNonCriticalError" }
+      ],
+      "Next": "ExtractFilename"
+    },
+
+    "LogNonCriticalError": {
+      "Type": "Pass",
+      "Comment": "Catalog refresh or validation query failed; the merge already succeeded, so continue to archive rather than failing the whole execution.",
+      "Next": "ExtractFilename"
+    },
+
+    "ExtractFilename": {
+      "Type": "Pass",
+      "Parameters": {
+        "filename.$": "States.ArrayGetItem(States.StringSplit($.key, '/'), States.MathAdd(States.ArrayLength(States.StringSplit($.key, '/')), -1))"
+      },
+      "ResultPath": "$.parsed",
+      "Next": "ArchiveRawFile"
+    },
+    "ArchiveRawFile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:copyObject",
+      "Parameters": {
+        "Bucket": "${bucket_name}",
+        "CopySource.$": "States.Format('${bucket_name}/{}', $.key)",
+        "Key.$": "States.Format('{}{}', $.ctx.archivePrefix, $.parsed.filename)"
+      },
+      "ResultPath": null,
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }
+      ],
+      "Next": "DeleteRawFile"
+    },
+    "DeleteRawFile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:s3:deleteObject",
+      "Parameters": { "Bucket.$": "$.bucket", "Key.$": "$.key" },
+      "ResultPath": null,
+      "Catch": [
+        { "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "NotifyFailure" }
+      ],
+      "Next": "PipelineSucceeded"
+    },
+    "PipelineSucceeded": { "Type": "Succeed" },
+
+    "UnknownDatasetFailed": { "Type": "Fail", "Error": "UnknownDataset", "Cause": "Object key did not match any known raw/<dataset>/ prefix" },
+
+    "NotifyFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "${sns_topic_arn}",
+        "Message.$": "States.Format('Lakehouse pipeline execution {} failed on key {}: {}', $$.Execution.Name, $.key, $.error.Cause)"
+      },
+      "Next": "PipelineFailed"
+    },
+    "PipelineFailed": { "Type": "Fail", "Error": "PipelineFailed" }
+  }
+}

@@ -1,0 +1,5 @@
+aws_region          = "eu-west-1"
+project_name        = "ecommerce-lakehouse"
+bucket_name_prefix  = "ecommerce-lakehouse"
+glue_database_name  = "ecommerce_lakehouse"
+alert_email         = "you@example.com"

@@ -1,0 +1,105 @@
+name: Lakehouse CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: lakehouse-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-python:
+    name: Lint Glue scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install lint tools
+        run: pip install ruff
+
+      - name: Ruff check
+        run: ruff check glue_jobs tools tests
+
+      - name: Byte-compile (catch syntax errors)
+        run: python -m py_compile glue_jobs/*.py glue_jobs/common/*.py tools/*.py
+
+  unit-tests:
+    name: Run validation/Delta unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ubuntu-latest ships a JDK already; pyspark just needs it on PATH.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run pytest
+        run: python -m pytest tests/ -q
+
+  validate-state-machine-template:
+    name: Validate Step Functions ASL template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render with dummy values and validate JSON
+        run: |
+          python3 - <<'PY'
+          import re, json
+          tpl = open("step_functions/state_machine.asl.json.tftpl").read()
+          vals = {
+              "bucket_name": "dummy-bucket",
+              "sns_topic_arn": "arn:aws:sns:us-east-1:000000000000:pipeline-alerts",
+              "products_job_name": "process-products",
+              "orders_job_name": "process-orders",
+              "order_items_job_name": "process-order-items",
+              "crawler_name": "dummy-crawler",
+              "glue_database": "ecommerce_lakehouse",
+              "athena_workgroup": "dummy-workgroup",
+              "products_table": "products",
+              "orders_table": "orders",
+              "order_items_table": "order_items",
+          }
+          rendered = re.sub(r"\$\{(\w+)\}", lambda m: vals[m.group(1)], tpl)
+          json.loads(rendered)
+          print("state machine template renders to valid JSON")
+          PY
+
+  terraform-fmt-validate:
+    name: Terraform fmt & validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: terraform init (no backend, no cloud calls)
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform validate
