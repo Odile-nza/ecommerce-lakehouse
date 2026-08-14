@@ -14,11 +14,14 @@
 
     "SetProductsContext": {
       "Type": "Pass",
+      "Comment": "ordersDeltaPath/productsDeltaPath are unused by process_products but always populated so ProcessDataset's Arguments (shared across all three datasets) can reference $.ctx.ordersDeltaPath/$.ctx.productsDeltaPath unconditionally.",
       "Parameters": {
         "jobName": "${products_job_name}",
         "deltaPath": "s3://${bucket_name}/lakehouse-dwh/products/",
         "rejectedPath": "s3://${bucket_name}/rejected/products/",
         "archivePrefix": "archived/products/",
+        "ordersDeltaPath": "s3://${bucket_name}/lakehouse-dwh/orders/",
+        "productsDeltaPath": "s3://${bucket_name}/lakehouse-dwh/products/",
         "athenaTable": "${products_table}"
       },
       "ResultPath": "$.ctx",
@@ -26,11 +29,14 @@
     },
     "SetOrdersContext": {
       "Type": "Pass",
+      "Comment": "ordersDeltaPath/productsDeltaPath are unused by process_orders but always populated so ProcessDataset's Arguments (shared across all three datasets) can reference $.ctx.ordersDeltaPath/$.ctx.productsDeltaPath unconditionally.",
       "Parameters": {
         "jobName": "${orders_job_name}",
         "deltaPath": "s3://${bucket_name}/lakehouse-dwh/orders/",
         "rejectedPath": "s3://${bucket_name}/rejected/orders/",
         "archivePrefix": "archived/orders/",
+        "ordersDeltaPath": "s3://${bucket_name}/lakehouse-dwh/orders/",
+        "productsDeltaPath": "s3://${bucket_name}/lakehouse-dwh/products/",
         "athenaTable": "${orders_table}"
       },
       "ResultPath": "$.ctx",
