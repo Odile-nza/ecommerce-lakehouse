@@ -107,3 +107,19 @@ def test_dedupe_keep_first_reports_duplicates(spark):
     assert kept.count() == 2
     assert duplicates.count() == 1
     assert duplicates.collect()[0]["reject_reasons"] == "duplicate:id"
+
+
+def test_dedupe_keep_first_order_by_breaks_ties_by_most_recent(spark):
+    from pyspark.sql import functions as F
+
+    df = spark.createDataFrame(
+        [(1, "2025-04-01T10:00:00"), (1, "2025-04-01T11:00:00")],
+        ["id", "order_timestamp"],
+    )
+
+    kept, duplicates = dedupe_keep_first(
+        df, ["id"], order_by=[F.col("order_timestamp").desc()]
+    )
+
+    assert kept.collect()[0]["order_timestamp"] == "2025-04-01T11:00:00"
+    assert duplicates.collect()[0]["order_timestamp"] == "2025-04-01T10:00:00"

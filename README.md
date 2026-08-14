@@ -5,6 +5,10 @@ are validated, deduplicated, and upserted into partitioned Delta Lake tables by 
 orchestrated end-to-end by Step Functions, and exposed for ad-hoc analytics through
 Athena via the Glue Data Catalog. All infrastructure is provisioned with Terraform.
 
+See [`docs/PROJECT_REPORT.md`](docs/PROJECT_REPORT.md) for the design rationale and the
+results obtained by deploying this to a real AWS account and driving it end-to-end,
+including a deliberate failure/rejection-path test.
+
 ## Architecture
 
 ```

@@ -1,7 +1,8 @@
 """
 Glue PySpark job: process_order_items
 
-Reads one raw order_items CSV, deduplicates by `id`, validates it
+Reads one raw order_items CSV, deduplicates by `id` (most recent
+`order_timestamp` wins, matching process_orders' tie-break), validates it
 (including referential integrity against the orders/products Delta tables),
 parses `order_timestamp`/`date`, and upserts the valid rows into the
 `order_items` Delta table, partitioned by `date`.
@@ -73,7 +74,9 @@ def main():
     if raw_count == 0:
         raise ValueError(f"no rows found in {raw_path}")
 
-    deduped, batch_duplicates = dedupe_keep_first(raw, [TABLE["primary_key"]])
+    deduped, batch_duplicates = dedupe_keep_first(
+        raw, [TABLE["primary_key"]], order_by=[F.col("order_timestamp").desc()]
+    )
 
     valid_order_ids = read_existing_keys(spark, args["ORDERS_DELTA_PATH"], "order_id")
     valid_product_ids = read_existing_keys(spark, args["PRODUCTS_DELTA_PATH"], "product_id")
