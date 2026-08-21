@@ -128,10 +128,32 @@ python tools/convert_samples_to_csv.py
 
 ## Deploying
 
+### 0. One-time: bootstrap remote state
+
+Terraform state for the main config is stored remotely in S3 (with DynamoDB locking) so
+that CI runs, local applies, and hotfixes all see the same real state instead of each
+starting from empty. That S3 bucket/table has to exist before the main config can use it
+as its own backend, so it's provisioned once via a separate, local-state config:
+
+```bash
+cd terraform/bootstrap
+terraform init
+terraform apply
+terraform output -raw state_bucket_name   # note this
+terraform output -raw lock_table_name     # and this
+cd ..
+cp backend.hcl.example backend.hcl        # fill in the two values above
+```
+
+Skip this if the bucket/table already exist for your environment — just fill in
+`backend.hcl` with the existing names.
+
+### 1. Deploy the main stack
+
 ```bash
 cd terraform
+terraform init -backend-config=backend.hcl
 cp terraform.tfvars.example terraform.tfvars   # set alert_email at minimum
-terraform init
 terraform plan
 terraform apply
 ```
@@ -210,4 +232,17 @@ suite above, a dummy-value render-and-parse check of the Step Functions ASL temp
 `.github/workflows/lakehouse-terraform.yml` runs `terraform plan` on PRs touching
 `terraform/`, `step_functions/`, or `glue_jobs/`, and supports a manual `apply` via
 `workflow_dispatch` gated behind a GitHub Environment named `aws` (add required reviewers
-there for a human approval gate).
+there for a human approval gate — note this requires a paid GitHub plan for private repos).
+
+Both `plan` and `apply` jobs initialize against the remote backend from §0 above using
+repo **variables** (Settings → Secrets and variables → Actions → Variables tab, not
+secrets — these aren't sensitive):
+
+| Variable | Value |
+|---|---|
+| `TF_STATE_BUCKET` | `terraform -chdir=terraform/bootstrap output -raw state_bucket_name` |
+| `TF_STATE_LOCK_TABLE` | `terraform -chdir=terraform/bootstrap output -raw lock_table_name` |
+| `TF_STATE_REGION` | optional, defaults to `eu-west-1` if unset |
+
+Without these set, `terraform init` in CI falls back to an empty local state per run —
+the same limitation this backend was added to fix.

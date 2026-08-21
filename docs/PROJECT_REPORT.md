@@ -36,9 +36,11 @@ via Terraform (a standing project requirement).
 | `sns.tf` | SNS topic + email subscription for pipeline failure alerts |
 | `step_functions.tf` | CloudWatch log group + the state machine, rendered from the ASL template |
 | `outputs.tf` | Bucket name, Glue database name, state machine ARN, Athena workgroup, SNS topic ARN |
+| `bootstrap/main.tf` | Separate root module (its own local state): the S3 bucket + DynamoDB lock table that the main config uses as *its* remote backend |
 
-No remote backend is configured — state lives only in whichever runner executed
-`terraform apply` (see [§6.3](#63-known-limitation-no-remote-terraform-state)).
+A remote backend (`terraform/bootstrap/` + a partial `backend "s3" {}` config) was added
+after initial deployment to fix a real gap this project hit twice — see
+[§6.3](#63-no-remote-terraform-state-found-fixed-after-teardown).
 
 ### 2.2 Glue PySpark jobs (`glue_jobs/`)
 
@@ -306,16 +308,26 @@ Required-reviewers protection rules for a GitHub Environment require a paid plan
 private repositories. The `aws` environment currently only gates secrets; the manual
 `workflow_dispatch` + explicit `action: apply` selection is the de facto approval step.
 
-### 6.3 Known limitation: no remote Terraform state
+### 6.3 No remote Terraform state (found, fixed after teardown)
 
-`terraform/versions.tf` has no `backend` block, so state exists only inside whichever
-runner executed `apply` and is discarded afterward. This worked for the initial `apply`
-(empty state → create everything) but means a second `apply` from a fresh runner would
-attempt to recreate fixed-name resources (IAM roles, Glue jobs, the Glue database, the SNS
-topic, etc.) and collide with what's already deployed. The Step Functions template bug fix
-(§5.1) was applied via a direct `aws stepfunctions update-state-machine` call specifically
-to avoid this risk. Adding an S3+DynamoDB (or Terraform Cloud) backend would resolve this
-properly.
+`terraform/versions.tf` originally had no `backend` block, so state existed only inside
+whichever runner executed `apply` and was discarded afterward. This worked for the initial
+`apply` (empty state → create everything) but meant a second `apply` from a fresh runner
+would attempt to recreate fixed-name resources (IAM roles, Glue jobs, the Glue database,
+the SNS topic, etc.) and collide with what's already deployed. Both the Step Functions
+template bug fix (§5.1) and the eventual full teardown (§7) had to bypass Terraform
+entirely — via direct `aws stepfunctions update-state-machine` and a hand-written AWS CLI
+deletion script, respectively — specifically because Terraform couldn't be trusted to know
+the real state of the account.
+
+**Fixed** by adding `terraform/bootstrap/` — a small, separate, local-state config that
+provisions an S3 bucket (versioned, encrypted) and a DynamoDB lock table — and wiring
+`terraform/versions.tf` to use them as a partial `backend "s3" {}` config (bucket/key/table
+supplied at `init` time via `backend.hcl` or, in CI, via `-backend-config` flags built from
+GitHub Actions repo variables). This was added *after* the AWS infrastructure was already
+torn down (§7), so it has been validated with `terraform validate`/`init -backend=false`
+but not yet exercised against a live `apply` — the next deployment of this project will be
+the first real test of the backend actually persisting state across runs.
 
 ### 6.4 Case-insensitive filesystem collision (caught before deployment)
 
@@ -328,15 +340,52 @@ was renamed to `sample_data/` to make the collision impossible going forward.
 
 ---
 
-## 7. Summary
+## 7. Teardown
+
+Once end-to-end validation (§5) and the dedup fix (§6.1) were confirmed working, all AWS
+resources were deliberately destroyed to avoid ongoing cost — this was a validation
+exercise, not a long-lived deployment.
+
+**`terraform destroy` was not used**, for the same reason noted in §6.3: with no state
+persisted anywhere, it would have run against an empty state and silently done nothing
+while every real resource stayed live. Instead, every resource was deleted directly via
+AWS CLI, in dependency order, with each step verified before moving to the next:
+
+1. S3 bucket — versioning meant deleting all 58 object versions and 5 delete markers
+   first (`list-object-versions` + `delete-objects`), then `delete-bucket`
+2. Step Functions state machine — confirmed gone via `describe-state-machine` returning
+   `StateMachineDoesNotExist`
+3. EventBridge rule + target (the real target ID, `terraform-<timestamp>...`, differed
+   from the `1` initially assumed — caught by listing targets before removing them)
+4. All 3 Glue jobs
+5. Glue Crawler and the Glue Data Catalog database
+6. Athena workgroup (`--recursive-delete-option`, to also clear saved query history)
+7. SNS topic
+8. All 4 IAM roles — inline policies deleted and the one attached managed policy
+   (`AWSGlueServiceRole`) detached before each role itself could be deleted
+9. The Step Functions CloudWatch log group
+
+The AWS CLI session used short-lived STS credentials that expired mid-teardown (immediately
+after step 2); teardown resumed cleanly from step 3 once refreshed, since each step was
+verified independently rather than assumed. Project 1's unrelated resources (the `primary`
+Athena workgroup, the `pipeline-alerts` SNS topic) were confirmed still present and
+untouched. Every deletion was independently verified with a `get`/`describe`/`list` call
+returning "not found" or an empty result — not just "the delete command returned exit 0."
+
+---
+
+## 8. Summary
 
 Every deliverable in the project brief was implemented and — unlike a purely
 paper/plan-stage submission — **exercised against a real, deployed AWS account**: raw CSV
 ingestion, Glue+Delta cleaning/dedup/validation, partitioned Delta tables, Glue Data
 Catalog registration, Athena querying, archiving, Step Functions orchestration with
-failure branching, and GitHub Actions CI/CD. One real orchestration bug was found and
-fixed through this process (§5.1) that would not have surfaced from local unit tests
-alone, since the failure was specific to how Step Functions resolves JSONPath references
-across the three routing branches — a good example of why "deploy and drive it for real"
-testing catches a different class of bug than unit tests targeting the Spark logic in
-isolation.
+failure branching, and GitHub Actions CI/CD. Two real bugs were found and fixed through
+this process that would not have surfaced from local unit tests alone: the Step Functions
+JSONPath routing bug (§5.1), specific to how the three dataset branches share one
+`ProcessDataset` task, and the order_items dedup tie-break inconsistency (§6.1), caught by
+the deliberate rejection-path test rather than by code review. A third structural gap — no
+remote Terraform state (§6.3) — was identified through the operational pain of working
+around it twice (a hotfix and a full teardown) and fixed afterward. Together these are a
+good illustration of why "deploy and drive it for real" testing catches a different class
+of bug than unit tests targeting application logic in isolation.

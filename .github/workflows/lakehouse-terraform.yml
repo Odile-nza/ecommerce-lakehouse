@@ -45,11 +45,17 @@ jobs:
         with:
           terraform_version: "1.9.0"
 
-      # State is local (no remote backend configured — see terraform/README.md
-      # if you add one), so this plan runs against a fresh/empty state on
-      # every invocation rather than the stack's real state.
+      # Backend is a partial config (see versions.tf) — bucket/table come from
+      # repo variables, pointing at the state bucket created once via
+      # terraform/bootstrap/. Without these vars set, this falls back to a
+      # fresh local state every run, same as before the backend was added.
       - name: terraform init
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=lakehouse/terraform.tfstate" \
+            -backend-config="region=${{ vars.TF_STATE_REGION || 'eu-west-1' }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
 
       - name: terraform plan
         run: terraform plan -input=false
@@ -77,7 +83,12 @@ jobs:
           terraform_version: "1.9.0"
 
       - name: terraform init
-        run: terraform init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=lakehouse/terraform.tfstate" \
+            -backend-config="region=${{ vars.TF_STATE_REGION || 'eu-west-1' }}" \
+            -backend-config="dynamodb_table=${{ vars.TF_STATE_LOCK_TABLE }}"
 
       - name: terraform apply
         run: terraform apply -input=false -auto-approve

@@ -1,0 +1,14 @@
+# Copy to backend.hcl (gitignored) and fill in with the outputs from
+# `terraform -chdir=bootstrap output -raw state_bucket_name` /
+# `terraform -chdir=bootstrap output -raw lock_table_name`, then run:
+#   terraform init -backend-config=backend.hcl
+#
+# In GitHub Actions, these same three values are passed via -backend-config
+# flags built from the TF_STATE_BUCKET / TF_STATE_LOCK_TABLE repo variables
+# instead of this file — see .github/workflows/lakehouse-terraform.yml.
+
+bucket         = "ecommerce-lakehouse-tfstate-XXXXXXXX"
+key            = "lakehouse/terraform.tfstate"
+region         = "eu-west-1"
+dynamodb_table = "ecommerce-lakehouse-tfstate-lock"
+encrypt        = true

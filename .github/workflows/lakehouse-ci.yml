@@ -103,3 +103,13 @@ jobs:
 
       - name: terraform validate
         run: terraform validate
+
+      # bootstrap/ is a separate root module (creates the S3 backend's own
+      # storage, so it can't itself use that backend) — validated separately.
+      - name: terraform init bootstrap (no backend, no cloud calls)
+        working-directory: terraform/bootstrap
+        run: terraform init -backend=false -input=false
+
+      - name: terraform validate bootstrap
+        working-directory: terraform/bootstrap
+        run: terraform validate

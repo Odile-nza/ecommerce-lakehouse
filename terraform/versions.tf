@@ -16,7 +16,11 @@ terraform {
     }
   }
 
-  # Add a backend block here (s3, etc.) if you want remote state.
+  # Partial backend config: bucket/key/region/dynamodb_table are supplied at
+  # `terraform init -backend-config=backend.hcl` time (see backend.hcl.example),
+  # not hardcoded here, so this file doesn't bake in one account's bucket name.
+  # Provisioned once via terraform/bootstrap/ — see that module's comments.
+  backend "s3" {}
 }
 
 provider "aws" {
